@@ -106,6 +106,7 @@ namespace Mesen.Interop
 				//Ensure external breakpoints are cleared and the debugger is released, even on
 				//shutdown. This is idempotent and the generation check in OnClientDisconnected
 				//makes any concurrent double cleanup harmless.
+				ClearInputOverrides();
 				BreakpointManager.ClearExternalBreakpoints();
 				if(!DebugWindowManager.HasOpenedDebugWindows()) {
 					try {
@@ -323,6 +324,7 @@ namespace Mesen.Interop
 			_apiGate.Wait();
 			try {
 				//Remove the external breakpoints added by the API client
+				ClearInputOverrides();
 				BreakpointManager.ClearExternalBreakpoints();
 				if(!DebugWindowManager.HasOpenedDebugWindows()) {
 					try {
@@ -650,6 +652,8 @@ namespace Mesen.Interop
 					case "debug.getCurrentInstruction": HandleGetCurrentInstruction(responder); break;
 					case "cpu.getRegisters": HandleGetRegisters(responder); break;
 					case "cpu.setRegisters": HandleSetRegisters(responder, req.Params); break;
+					case "input.set": HandleInputSet(responder, req.Params); break;
+					case "input.clear": HandleInputClear(responder, req.Params); break;
 					case "memory.list": HandleMemoryList(responder); break;
 					case "memory.read": HandleMemoryRead(responder, req.Params); break;
 					case "memory.write": HandleMemoryWrite(responder, req.Params); break;
@@ -882,6 +886,103 @@ namespace Mesen.Interop
 				Ps = (byte)state.PS,
 				EmulationMode = state.EmulationMode,
 			};
+		}
+
+		private static void HandleInputSet(RpcResponder responder, JsonElement? paramsEl)
+		{
+			EnsureDebuggerRunning();
+			ControllerInputRequest? request = ParseParams<ControllerInputRequest>(paramsEl);
+			if(request == null || request.Buttons == null) {
+				throw new RpcException(-32602, "Invalid parameters");
+			}
+
+			uint index = ValidateController(request.Controller, requireAvailable: true);
+			DebugControllerState state = new DebugControllerState();
+			HashSet<string> buttons = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			foreach(string buttonValue in request.Buttons) {
+				string button = buttonValue?.Trim() ?? "";
+				if(!buttons.Add(button)) {
+					continue;
+				}
+
+				switch(button.ToUpperInvariant()) {
+					case "A": state.A = true; break;
+					case "B": state.B = true; break;
+					case "X": state.X = true; break;
+					case "Y": state.Y = true; break;
+					case "L": state.L = true; break;
+					case "R": state.R = true; break;
+					case "UP": state.Up = true; break;
+					case "DOWN": state.Down = true; break;
+					case "LEFT": state.Left = true; break;
+					case "RIGHT": state.Right = true; break;
+					case "SELECT": state.Select = true; break;
+					case "START": state.Start = true; break;
+					default: throw new RpcException(-32602, "Invalid SNES button: " + button);
+				}
+			}
+
+			DebugApi.SetInputOverrides(index, state);
+			responder.SendResult(DebugApiJsonContext.Default.ControllerInputResponse, new ControllerInputResponse() {
+				Controller = request.Controller,
+				Buttons = GetPressedButtons(state),
+			});
+		}
+
+		private static void HandleInputClear(RpcResponder responder, JsonElement? paramsEl)
+		{
+			EnsureDebuggerRunning();
+			ControllerClearRequest? request = ParseParams<ControllerClearRequest>(paramsEl);
+			if(request == null) {
+				throw new RpcException(-32602, "Invalid parameters");
+			}
+
+			uint index = ValidateController(request.Controller, requireAvailable: false);
+			DebugApi.SetInputOverrides(index, new DebugControllerState());
+			responder.SendResult(DebugApiJsonContext.Default.ControllerInputResponse, new ControllerInputResponse() {
+				Controller = request.Controller,
+			});
+		}
+
+		private static uint ValidateController(int controller, bool requireAvailable)
+		{
+			if(controller < 1 || controller > 8) {
+				throw new RpcException(-32602, "Controller must be between 1 and 8");
+			}
+
+			int index = controller - 1;
+			if(requireAvailable && !DebugApi.GetAvailableInputOverrides().Contains(index)) {
+				throw new RpcException(-32602, "Controller is not available: " + controller);
+			}
+			return (uint)index;
+		}
+
+		private static List<string> GetPressedButtons(DebugControllerState state)
+		{
+			List<string> buttons = new List<string>();
+			if(state.A) buttons.Add("A");
+			if(state.B) buttons.Add("B");
+			if(state.X) buttons.Add("X");
+			if(state.Y) buttons.Add("Y");
+			if(state.L) buttons.Add("L");
+			if(state.R) buttons.Add("R");
+			if(state.Up) buttons.Add("Up");
+			if(state.Down) buttons.Add("Down");
+			if(state.Left) buttons.Add("Left");
+			if(state.Right) buttons.Add("Right");
+			if(state.Select) buttons.Add("Select");
+			if(state.Start) buttons.Add("Start");
+			return buttons;
+		}
+
+		private static void ClearInputOverrides()
+		{
+			for(uint index = 0; index < 8; index++) {
+				try {
+					DebugApi.SetInputOverrides(index, new DebugControllerState());
+				} catch {
+				}
+			}
 		}
 
 		private static void HandleMemoryList(RpcResponder responder)

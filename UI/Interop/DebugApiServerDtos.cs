@@ -104,6 +104,23 @@ namespace Mesen.Interop
 		public bool? EmulationMode { get; init; }
 	}
 
+	public record ControllerInputRequest
+	{
+		public int Controller { get; init; } = 1;
+		public List<string> Buttons { get; init; } = new();
+	}
+
+	public record ControllerClearRequest
+	{
+		public int Controller { get; init; } = 1;
+	}
+
+	public record ControllerInputResponse
+	{
+		public int Controller { get; init; }
+		public List<string> Buttons { get; init; } = new();
+	}
+
 	public record MemoryRegionInfo
 	{
 		public string Id { get; init; } = "";
@@ -189,6 +206,9 @@ namespace Mesen.Interop
 	[JsonSerializable(typeof(InstructionResponse))]
 	[JsonSerializable(typeof(SnesRegistersResponse))]
 	[JsonSerializable(typeof(SnesRegistersUpdate))]
+	[JsonSerializable(typeof(ControllerInputRequest))]
+	[JsonSerializable(typeof(ControllerClearRequest))]
+	[JsonSerializable(typeof(ControllerInputResponse))]
 	[JsonSerializable(typeof(MemoryRegionInfo))]
 	[JsonSerializable(typeof(MemoryListResponse))]
 	[JsonSerializable(typeof(MemoryReadRequest))]
