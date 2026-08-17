@@ -35,7 +35,7 @@ namespace Mesen.ViewModels
 
 		public void SaveSpcFile(string filename)
 		{
-			bool releaseDebugger = !DebugWindowManager.HasOpenedDebugWindows();
+			bool releaseDebugger = !DebugWindowManager.HasOpenedDebugWindows() && !DebugApiServer.IsClientConnected;
 			bool paused = EmuApi.IsPaused();
 
 			using(FileStream stream = File.Open(filename, FileMode.Create)) {

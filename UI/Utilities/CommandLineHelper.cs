@@ -26,6 +26,7 @@ public class CommandLineHelper
 	public bool NoAudio { get; private set; }
 	public bool NoInput { get; private set; }
 	public bool Fullscreen { get; private set; }
+	public bool DebugApi { get; private set; }
 	public bool LoadLastSessionRequested { get; private set; }
 	public string? MovieToRecord { get; private set; } = null;
 	public int TestRunnerTimeout { get; private set; } = 100;
@@ -61,6 +62,7 @@ public class CommandLineHelper
 					case "noaudio": NoAudio = true; break;
 					case "noinput": NoInput = true; break;
 					case "fullscreen": Fullscreen = true; break;
+					case "debugapi": DebugApi = true; break;
 					case "enablestdout": ConfigApi.SetEmulationFlag(EmulationFlags.OutputToStdout, true); break;
 					case "donotsavesettings": ConfigManager.DisableSaveSettings = true; break;
 					case "loadlastsession": LoadLastSessionRequested = true; break;
@@ -184,6 +186,7 @@ public class CommandLineHelper
 		string general = @"--doNotSaveSettings - Prevent settings from being saved to the disk (useful to prevent command line options from becoming the default settings)
 --enableStdout - Writes the log window's content to stdout
 --fullscreen - Start in fullscreen mode
+--debugApi - Start the external debug API (named pipe ""mesen-debug-api"", see EXTERNAL-DEBUG-API.md)
 --loadLastSession - Resumes the game in the state it was left in when it was last played.
 --recordMovie=""filename.mmo"" - Start recording a movie after the specified game is loaded.
 --testRunner [lua script] [rom file] - Runs a Lua script in headless mode (use emu.exit(...) to stop execution)

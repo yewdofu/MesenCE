@@ -212,7 +212,12 @@ namespace Mesen.Debugger.ViewModels
 			LabelManager.OnLabelUpdated -= LabelManager_OnLabelUpdated;
 			BreakpointManager.BreakpointsChanged -= BreakpointManager_BreakpointsChanged;
 			BreakpointManager.RemoveCpuType(CpuType);
-			ConfigApi.SetDebuggerFlag(CpuType.GetDebuggerFlag(), false);
+			//While an external API client is connected, the SNES debugger flag is owned by the
+			//API session and must remain enabled (the API still drives the SNES debugger). Only
+			//reset it here when no client is connected. Other CPU flags are unaffected.
+			if(CpuType != CpuType.Snes || !DebugApiServer.IsClientConnected) {
+				ConfigApi.SetDebuggerFlag(CpuType.GetDebuggerFlag(), false);
+			}
 		}
 
 		private void Config_PropertyChanged(object? sender, PropertyChangedEventArgs e)

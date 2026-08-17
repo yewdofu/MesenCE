@@ -14,20 +14,62 @@ namespace Mesen.Debugger
 		private static List<Breakpoint> _breakpoints = new List<Breakpoint>();
 		private static List<Breakpoint> _temporaryBreakpoints = new List<Breakpoint>();
 		private static HashSet<CpuType> _activeCpuTypes = new HashSet<CpuType>();
+		private static List<Breakpoint> _asserts = new List<Breakpoint>();
+
+		/// <summary>
+		/// Guards the structural state of the UI-side breakpoint lists, asserts, temporary
+		/// breakpoints and active cpu types so the pipe worker (SetBreakpoints) can never
+		/// enumerate them while the UI thread mutates them. Always acquire this lock before
+		/// _externalLock. Never raise BreakpointsChanged or call DebugApi.SetBreakpoints while
+		/// holding this lock.
+		/// </summary>
+		private static readonly object _structureLock = new();
+
+		private static readonly object _externalLock = new();
+		private static Dictionary<int, Breakpoint> _externalBreakpoints = new Dictionary<int, Breakpoint>();
+
+		/// <summary>
+		/// Serializes the whole SetBreakpoints pipeline (snapshot, core-&gt;api map build, and the
+		/// final native DebugApi.SetBreakpoints call) so that multiple concurrent invocations
+		/// cannot send an older snapshot to the core after a newer one. Acquire this before
+		/// _structureLock / _externalLock; the native call happens inside this lock but outside
+		/// the structural/external locks.
+		/// </summary>
+		private static readonly object _setBreakpointsLock = new();
+		private static Dictionary<int, int> _coreToApiId = new Dictionary<int, int>();
+		private static int _externalBreakpointIdCounter = 0;
 
 		public static ReadOnlyCollection<Breakpoint> Breakpoints
 		{
-			get { return _breakpoints.ToList().AsReadOnly(); }
+			get {
+				lock(_structureLock) {
+					return _breakpoints.ToList().AsReadOnly();
+				}
+			}
 		}
 
-		public static List<Breakpoint> Asserts { internal get; set; } = new List<Breakpoint>();
+		public static List<Breakpoint> Asserts
+		{
+			internal get {
+				lock(_structureLock) {
+					return _asserts.ToList();
+				}
+			}
+			set {
+				lock(_structureLock) {
+					_asserts = value ?? new List<Breakpoint>();
+				}
+			}
+		}
 
 		public static List<Breakpoint> GetBreakpoints(CpuType cpuType)
 		{
 			List<Breakpoint> breakpoints = new List<Breakpoint>();
-			foreach(Breakpoint bp in _breakpoints) {
-				if(bp.CpuType == cpuType) {
-					breakpoints.Add(bp);
+			lock(_structureLock) {
+				foreach(Breakpoint bp in _breakpoints) {
+					if(bp.CpuType == cpuType) {
+						breakpoints.Add(bp);
+					}
 				}
 			}
 			return breakpoints;
@@ -35,37 +77,50 @@ namespace Mesen.Debugger
 
 		public static void AddCpuType(CpuType cpuType)
 		{
-			_activeCpuTypes.Add(cpuType);
+			lock(_structureLock) {
+				_activeCpuTypes.Add(cpuType);
+			}
 			SetBreakpoints();
 		}
 
 		public static void RemoveCpuType(CpuType cpuType)
 		{
-			_activeCpuTypes.Remove(cpuType);
+			lock(_structureLock) {
+				_activeCpuTypes.Remove(cpuType);
+			}
 			SetBreakpoints();
 		}
 
 		public static void RefreshBreakpoints(Breakpoint? bp = null)
 		{
+			//Raised outside any lock to avoid deadlocks with UI handlers
 			BreakpointsChanged?.Invoke(bp, EventArgs.Empty);
 			SetBreakpoints();
 		}
 
 		public static void ClearBreakpoints()
 		{
-			_breakpoints = new();
+			lock(_structureLock) {
+				_breakpoints = new();
+			}
 			RefreshBreakpoints();
 		}
 
 		public static void AddBreakpoints(List<Breakpoint> breakpoints)
 		{
-			_breakpoints.AddRange(breakpoints);
+			lock(_structureLock) {
+				_breakpoints.AddRange(breakpoints);
+			}
 			RefreshBreakpoints();
 		}
 
 		public static void RemoveBreakpoint(Breakpoint bp)
 		{
-			if(_breakpoints.Remove(bp)) {
+			bool removed;
+			lock(_structureLock) {
+				removed = _breakpoints.Remove(bp);
+			}
+			if(removed) {
 				DebugWorkspaceManager.AutoSave();
 			}
 			RefreshBreakpoints(bp);
@@ -73,16 +128,24 @@ namespace Mesen.Debugger
 
 		public static void RemoveBreakpoints(IEnumerable<Breakpoint> breakpoints)
 		{
-			foreach(Breakpoint bp in breakpoints) {
-				_breakpoints.Remove(bp);
+			lock(_structureLock) {
+				foreach(Breakpoint bp in breakpoints) {
+					_breakpoints.Remove(bp);
+				}
 			}
 			RefreshBreakpoints(null);
 		}
 
 		public static void AddBreakpoint(Breakpoint bp)
 		{
-			if(!_breakpoints.Contains(bp)) {
-				_breakpoints.Add(bp);
+			bool added;
+			lock(_structureLock) {
+				added = !_breakpoints.Contains(bp);
+				if(added) {
+					_breakpoints.Add(bp);
+				}
+			}
+			if(added) {
 				DebugWorkspaceManager.AutoSave();
 			}
 			RefreshBreakpoints(bp);
@@ -107,14 +170,22 @@ namespace Mesen.Debugger
 
 		public static void AddTemporaryBreakpoint(Breakpoint bp)
 		{
-			_temporaryBreakpoints.Add(bp);
+			lock(_structureLock) {
+				_temporaryBreakpoints.Add(bp);
+			}
 			SetBreakpoints();
 		}
 
 		public static void ClearTemporaryBreakpoints()
 		{
-			if(_temporaryBreakpoints.Count > 0) {
-				_temporaryBreakpoints.Clear();
+			bool cleared;
+			lock(_structureLock) {
+				cleared = _temporaryBreakpoints.Count > 0;
+				if(cleared) {
+					_temporaryBreakpoints.Clear();
+				}
+			}
+			if(cleared) {
 				SetBreakpoints();
 			}
 		}
@@ -230,38 +301,144 @@ namespace Mesen.Debugger
 
 		public static void SetBreakpoints()
 		{
-			List<InteropBreakpoint> breakpoints = new List<InteropBreakpoint>();
+			//Serialize the entire pipeline (snapshot through the native call) so concurrent
+			//invocations cannot send an older snapshot to the core after a newer one.
+			lock(_setBreakpointsLock) {
+				List<InteropBreakpoint> breakpoints = new List<InteropBreakpoint>();
 
-			int id = 0;
-			void toInteropBreakpoints(IEnumerable<Breakpoint> bpList)
-			{
-				foreach(Breakpoint bp in bpList) {
-					if(_activeCpuTypes.Contains(bp.CpuType)) {
-						breakpoints.Add(bp.ToInteropBreakpoint(id));
-					}
-					id++;
+				//Snapshot the UI-side structural state under the structure lock. The active cpu
+				//types are captured together with the lists so the enumeration is consistent.
+				HashSet<CpuType> activeCpuTypes;
+				List<Breakpoint> uiBreakpoints;
+				List<Breakpoint> asserts;
+				List<Breakpoint> temporaryBreakpoints;
+				lock(_structureLock) {
+					activeCpuTypes = new HashSet<CpuType>(_activeCpuTypes);
+					uiBreakpoints = new List<Breakpoint>(_breakpoints);
+					asserts = new List<Breakpoint>(_asserts);
+					temporaryBreakpoints = new List<Breakpoint>(_temporaryBreakpoints);
 				}
+
+				int id = 0;
+				void toInteropBreakpoints(IEnumerable<Breakpoint> bpList)
+				{
+					foreach(Breakpoint bp in bpList) {
+						if(activeCpuTypes.Contains(bp.CpuType)) {
+							breakpoints.Add(bp.ToInteropBreakpoint(id));
+						}
+						id++;
+					}
+				}
+
+				toInteropBreakpoints(uiBreakpoints);
+				toInteropBreakpoints(asserts);
+				toInteropBreakpoints(temporaryBreakpoints);
+
+				Dictionary<int, int> coreToApi;
+				lock(_externalLock) {
+					//External breakpoints are managed independently of the UI's active cpu types,
+					//so they are always sent to the core (the core only applies them to cpu types
+					//that exist in the currently loaded game).
+					//Build an explicit core id -> api id map so event.break notifications can be
+					//resolved back to the API-stable id without relying on dictionary enumeration order.
+					coreToApi = new Dictionary<int, int>();
+					foreach(KeyValuePair<int, Breakpoint> kvp in BreakpointManager._externalBreakpoints) {
+						coreToApi[id] = kvp.Key;
+						breakpoints.Add(kvp.Value.ToInteropBreakpoint(id));
+						id++;
+					}
+					BreakpointManager._coreToApiId = coreToApi;
+				}
+
+				//Call the native core outside the structural/external locks (never while holding
+				//either of those), but still inside the SetBreakpoints lock.
+				DebugApi.SetBreakpoints(breakpoints.ToArray(), (UInt32)breakpoints.Count);
 			}
-
-			toInteropBreakpoints(BreakpointManager.Breakpoints);
-			toInteropBreakpoints(BreakpointManager.Asserts);
-			toInteropBreakpoints(BreakpointManager._temporaryBreakpoints);
-
-			DebugApi.SetBreakpoints(breakpoints.ToArray(), (UInt32)breakpoints.Count);
 		}
 
 		public static Breakpoint? GetBreakpointById(int breakpointId)
 		{
 			if(breakpointId < 0) {
 				return null;
-			} else if(breakpointId < _breakpoints.Count) {
-				return _breakpoints[breakpointId];
-			} else if(breakpointId < _breakpoints.Count + Asserts.Count) {
-				return Asserts[breakpointId - _breakpoints.Count];
-			} else if(breakpointId < _breakpoints.Count + Asserts.Count + _temporaryBreakpoints.Count) {
-				return _temporaryBreakpoints[breakpointId - _breakpoints.Count - Asserts.Count];
+			}
+
+			lock(_setBreakpointsLock) {
+				lock(_structureLock) {
+					if(breakpointId < _breakpoints.Count) {
+						return _breakpoints[breakpointId];
+					} else if(breakpointId < _breakpoints.Count + _asserts.Count) {
+						return _asserts[breakpointId - _breakpoints.Count];
+					} else if(breakpointId < _breakpoints.Count + _asserts.Count + _temporaryBreakpoints.Count) {
+						return _temporaryBreakpoints[breakpointId - _breakpoints.Count - _asserts.Count];
+					}
+				}
+
+				lock(_externalLock) {
+					if(_coreToApiId.TryGetValue(breakpointId, out int apiId) && _externalBreakpoints.TryGetValue(apiId, out Breakpoint? externalBp)) {
+						return externalBp;
+					}
+				}
 			}
 			return null;
+		}
+
+		/// <summary>
+		/// Resolves a core-assigned breakpoint id to the API-stable external breakpoint id,
+		/// or returns null if the given core id does not belong to an external breakpoint
+		/// (e.g. it is a UI/assert/temporary breakpoint).
+		/// </summary>
+		public static int? GetExternalApiBreakpointId(int coreBreakpointId)
+		{
+			lock(_setBreakpointsLock) {
+				lock(_externalLock) {
+					if(_coreToApiId.TryGetValue(coreBreakpointId, out int apiId)) {
+						return apiId;
+					}
+				}
+			}
+			return null;
+		}
+
+		public static int AddExternalBreakpoint(Breakpoint bp)
+		{
+			int apiId;
+			lock(_externalLock) {
+				apiId = _externalBreakpointIdCounter++;
+				_externalBreakpoints[apiId] = bp;
+			}
+			SetBreakpoints();
+			return apiId;
+		}
+
+		public static bool RemoveExternalBreakpoint(int apiId)
+		{
+			bool removed;
+			lock(_externalLock) {
+				removed = _externalBreakpoints.Remove(apiId);
+			}
+			if(removed) {
+				SetBreakpoints();
+			}
+			return removed;
+		}
+
+		public static void ClearExternalBreakpoints()
+		{
+			bool cleared;
+			lock(_externalLock) {
+				cleared = _externalBreakpoints.Count > 0;
+				_externalBreakpoints.Clear();
+			}
+			if(cleared) {
+				SetBreakpoints();
+			}
+		}
+
+		public static List<KeyValuePair<int, Breakpoint>> GetExternalBreakpoints()
+		{
+			lock(_externalLock) {
+				return _externalBreakpoints.ToList();
+			}
 		}
 	}
 }

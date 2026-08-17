@@ -181,6 +181,7 @@ namespace Mesen.Windows
 			}
 
 			_timerBackgroundFlag.Stop();
+			DebugApiServer.Dispose();
 			EmuApi.Stop();
 			_listener?.Dispose();
 			EmuApi.Release();
@@ -273,6 +274,10 @@ namespace Mesen.Windows
 
 				_listener = new NotificationListener();
 				_listener.OnNotification += OnNotification;
+
+				if(cmdLine.DebugApi) {
+					DebugApiServer.Start();
+				}
 
 				_model.Init(this);
 

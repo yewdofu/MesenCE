@@ -21,6 +21,9 @@ namespace Mesen.Interop
 		[DllImport(DllPath)] public static extern void InitializeDebugger();
 		[DllImport(DllPath)] public static extern void ReleaseDebugger();
 
+		[DllImport(DllPath)][return: MarshalAs(UnmanagedType.I1)] public static extern bool IsDebuggerRunning();
+		[DllImport(DllPath)][return: MarshalAs(UnmanagedType.I1)] public static extern bool IsExecutionStopped();
+
 		[DllImport(DllPath)] public static extern void ResumeExecution();
 		[DllImport(DllPath)] public static extern void Step(CpuType cpuType, Int32 instructionCount, StepType type = StepType.Step);
 
